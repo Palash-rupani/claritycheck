@@ -18,3 +18,9 @@ def save_profile(db: Session, product_id: str, profile: dict):
     db.add(rec)
     db.commit()
     return rec
+
+# add this to app/crud/products.py
+from app.models.product_profile import ProductProfile
+
+def get_latest_profile(db: Session, product_id: str):
+    return db.query(ProductProfile).filter(ProductProfile.product_id == product_id).order_by(ProductProfile.created_at.desc()).first()
