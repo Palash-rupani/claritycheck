@@ -1,31 +1,43 @@
 # ai-service/main.py
-# Uploaded file reference: /mnt/data/9c6bd615-6a6f-40af-b74a-81eeb385b1b9.png
 
 import os
 import difflib
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Dict, List, Any
 from dotenv import load_dotenv
-from transformers import pipeline
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 
 from utils import profile_to_prompt, clean_generated_text
 
+# -----------------------------
 # Load environment variables
+# -----------------------------
 load_dotenv()
 
-# Model and generation config (set via env or defaults)
-APP_MODEL = os.getenv("AI_MODEL", "google/flan-t5-large")  # change to your Flan model id if needed
-NUM_QUESTIONS = int(os.getenv("NUM_QUESTIONS", "5"))
-MAX_LENGTH = int(os.getenv("MAX_LENGTH", "128"))
-NUM_CANDIDATES = int(os.getenv("NUM_CANDIDATES", str(max(8, NUM_QUESTIONS * 2))))  # generate extra candidates
+MODEL_NAME = os.getenv("AI_MODEL", "google/flan-t5-large")
+NUM_QUESTIONS = int(os.getenv("NUM_QUESTIONS", "6"))
+MAX_LENGTH = int(os.getenv("MAX_LENGTH", "150"))
+NUM_CANDIDATES = int(os.getenv("NUM_CANDIDATES", str(NUM_QUESTIONS * 3)))
 
-app = FastAPI(title="ClarityCheck AI Service (Improved)")
+app = FastAPI(title="ClarityCheck AI Service - Smart QG")
 
-# Initialize pipeline (CPU by default; set CUDA_VISIBLE_DEVICES or device_map externally if needed)
-print(f"Loading model: {APP_MODEL} ... (this may take some time)")
-qg_pipeline = pipeline("text2text-generation", model=APP_MODEL, device=-1)
-print("Model loaded successfully.")
+print(f"\n🚀 Loading model: {MODEL_NAME} (CPU-only)\n")
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModelForSeq2SeqLM.from_pretrained(
+    MODEL_NAME,
+    device_map="cpu"
+)
+
+qg_pipeline = pipeline(
+    "text2text-generation",
+    model=model,
+    tokenizer=tokenizer,
+    device=-1
+)
+
+print("✅ Model loaded successfully.\n")
 
 
 # -----------------------------
@@ -53,7 +65,7 @@ def root():
 
 
 # -----------------------------
-# HELPERS: filtering, fuzzy dedupe, semantic checks
+# FILTERING RULES
 # -----------------------------
 FORBIDDEN_PATTERNS = [
     "manufacturer",
@@ -65,14 +77,11 @@ FORBIDDEN_PATTERNS = [
     "lot number",
     "where is it sold",
     "any other questions",
-    "what else",
     "are there any other",
+    "what else",
+    "other questions",
     "can i ask",
     "how to ask",
-    "ask about",
-    "what can i ask",
-    "other questions",
-    "who is the manufacturer",
 ]
 
 MEANINGFUL_KEYWORDS = [
@@ -83,117 +92,110 @@ MEANINGFUL_KEYWORDS = [
     "packaging", "recycl", "waste", "ethic", "sustainab", "supply", "quality",
 ]
 
-def is_meaningful(question: str) -> bool:
-    q = question.lower()
-    return any(kw in q for kw in MEANINGFUL_KEYWORDS)
 
-def is_forbidden(question: str) -> bool:
-    q = question.lower()
-    return any(p in q for p in FORBIDDEN_PATTERNS)
+def is_forbidden(q: str) -> bool:
+    q = q.lower()
+    return any(f in q for f in FORBIDDEN_PATTERNS)
 
-def is_duplicate(question: str, seen: List[str], threshold: float = 0.75) -> bool:
+
+def is_meaningful(q: str) -> bool:
+    q = q.lower()
+    return any(k in q for k in MEANINGFUL_KEYWORDS)
+
+
+def is_duplicate(q: str, seen: List[str], threshold=0.75) -> bool:
     for s in seen:
-        ratio = difflib.SequenceMatcher(None, question.lower(), s.lower()).ratio()
-        if ratio >= threshold:
+        if difflib.SequenceMatcher(None, q.lower(), s.lower()).ratio() >= threshold:
             return True
     return False
 
 
 # -----------------------------
-# FALLBACK POOLS (category-aware)
+# CATEGORY FALLBACK POOLS
 # -----------------------------
-FALLBACK_POOLS = {
+FALLBACK = {
     "electronics": [
-        "Is the device compliant with RoHS or equivalent material restrictions?",
-        "Can you provide details on the recyclability of key components?",
-        "Are repair manuals and spare parts available for maintenance?",
-        "Are safety test reports available for batteries and chargers?"
+        "Is the product compliant with RoHS or similar safety standards?",
+        "Are battery or electrical safety test reports available?",
+        "Are key components recyclable or sustainably sourced?",
+        "Are repair manuals or spare parts available?"
     ],
     "skincare": [
-        "Have ingredients undergone skin irritation or sensitivity testing?",
-        "Are any known allergens present in the formulation?",
-        "Is there a Certificate of Analysis (COA) for key actives?",
-        "Do suppliers provide ingredient provenance for botanical extracts?"
+        "Are any ingredients subject to allergen warnings?",
+        "Is there third-party testing for safety or irritation?",
+        "Is a Certificate of Analysis available for key actives?",
+        "Do suppliers provide verified sourcing details?"
     ],
     "raw": [
         "What farming practices were used during cultivation?",
-        "Were pesticides or fertilizers applied during growth?",
-        "From which region or farm were the raw ingredients sourced?",
-        "How was the product stored and transported post-harvest?"
+        "Were any pesticides applied during growth?",
+        "From which region were the raw ingredients sourced?",
+        "How was freshness maintained during transport?"
     ],
     "packaged": [
-        "Are all ingredients fully traceable to verified suppliers?",
-        "What processing steps are used and are they documented?",
-        "Are any additives or preservatives used in the product?",
-        "Are third-party quality checks performed during production?"
+        "Are all ingredients fully traceable to their suppliers?",
+        "What processing or quality-control steps are documented?",
+        "Are any additives or preservatives used?",
+        "Are third-party quality checks performed?"
     ],
     "supplement": [
         "Is a Certificate of Analysis (COA) available for each batch?",
-        "Has the product undergone third-party purity or potency testing?",
-        "Can you verify the origin of each active ingredient?",
-        "Are stability and shelf-life studies available?"
+        "Has the product undergone purity or potency testing?",
+        "Can you trace the source of each active ingredient?",
+        "Are stability studies available for shelf life?"
     ],
     "generic": [
-        "Are third-party safety or compliance certificates available?",
-        "Can you share supplier traceability for the main components?",
-        "Is there documentation validating the product claims?"
-    ],
+        "Are third-party safety or compliance reports available?",
+        "Can you verify supplier traceability for key materials?",
+        "Is documentation available to support marketing claims?"
+    ]
 }
 
 
 # -----------------------------
-# POST /followups (improved)
+# POST /followups
 # -----------------------------
 @app.post("/followups", response_model=FollowupsResponse)
 def generate_followups(req: FollowupRequest):
-    """
-    Generate high-quality, category-aware follow-up questions with strong filtering.
-    Designed to work well with Google Flan-family models by heavy post-filtering
-    and fallback pools to guarantee good questions.
-    """
 
     product = req.product or {}
     profile = req.profile or {}
 
+    # Handle Supabase structure
+    profile_data = profile.get("profile", profile)
+
     name = (product.get("name") or "").strip()
-    category_raw = (product.get("category") or "").lower().strip()
     description = (product.get("description") or "").strip()
     claim = (product.get("claim") or "").strip()
+    category_raw = (product.get("category") or "").lower().strip()
 
-    # If profile is nested like Supabase (profile.profile), normalize:
-    if isinstance(profile, dict) and "profile" in profile and isinstance(profile["profile"], dict):
-        profile_inner = profile["profile"]
+    ingredients = profile_data.get("ingredients", "")
+    sourcing = profile_data.get("sourcing", "")
+    certifications = profile_data.get("certifications", "")
+
+    structured_profile = profile_to_prompt(profile_data)
+
+    # Category detection
+    if any(x in category_raw for x in ["electronic", "device", "gadget"]):
+        category = "electronics"
+    elif any(x in category_raw for x in ["skincare", "cosmetic", "serum"]):
+        category = "skincare"
+    elif any(x in category_raw for x in ["vegetable", "fruit", "grain", "produce"]):
+        category = "raw"
+    elif any(x in category_raw for x in ["snack", "food", "packaged", "processed"]):
+        category = "packaged"
+    elif any(x in category_raw for x in ["supplement", "vitamin"]):
+        category = "supplement"
     else:
-        profile_inner = profile
+        category = "generic"
 
-    ingredients = (profile_inner.get("ingredients") or "").strip()
-    sourcing = (profile_inner.get("sourcing") or "").strip()
-    certifications = (profile_inner.get("certifications") or "").strip()
-    additional = (profile_inner.get("additionalDetails") or profile_inner.get("additional_details") or "").strip()
-
-    structured_profile = profile_to_prompt(profile_inner)
-
-    # --- category classification (simple heuristics)
-    product_type = "generic"
-    if any(x in category_raw for x in ["electronic", "device", "gadget", "appliance", "battery"]):
-        product_type = "electronics"
-    elif any(x in category_raw for x in ["skincare", "cosmetic", "cream", "lotion", "serum", "makeup"]):
-        product_type = "skincare"
-    elif any(x in category_raw for x in ["vegetable", "fruit", "grain", "produce", "potato"]):
-        product_type = "raw"
-    elif any(x in category_raw for x in ["snack", "food", "beverage", "packaged", "processed"]):
-        product_type = "packaged"
-    elif any(x in category_raw for x in ["supplement", "vitamin", "capsule", "tablet"]):
-        product_type = "supplement"
-    else:
-        product_type = "generic"
-
-    # --- Build model prompt (concise, strict instructions)
+    # -----------------------------
+    # Build model prompt
+    # -----------------------------
     base_prompt = f"""
-You are a specialist assistant that generates one concise, category-specific transparency follow-up question.
-Focus only on transparency: sourcing, testing, traceability, compliance, certifications, or safety.
-DO NOT ask for product name, manufacturer name, batch/lot numbers, or generic "what else" style questions.
-Product: {name}
+Generate ONE short (max 20 words), category-focused transparency question.
+
+Product Name: {name}
 Category: {category_raw}
 Claim: {claim}
 Description: {description}
@@ -201,113 +203,73 @@ Description: {description}
 Profile:
 {structured_profile}
 
-Return ONLY the question text. Keep it under 20 words.
+Rules:
+- MUST focus on transparency: testing, sourcing, traceability, certification, compliance, or safety.
+- NEVER ask about product name, manufacturer name, “other questions”, or meta questions.
+- MUST match the category.
+- Question must be unique and meaningful.
+Return only the question.
 """
 
-    # Generate candidate outputs (more than needed to increase chance of quality)
-    candidates = []
-    try:
-        model_out = qg_pipeline(
-            base_prompt,
-            max_length=MAX_LENGTH,
-            num_return_sequences=NUM_CANDIDATES
-        )
-        # model_out is a list of dicts with 'generated_text'
-        for o in model_out:
-            txt = o.get("generated_text") or ""
-            candidates.append(clean_generated_text(txt))
-    except Exception as e:
-        print("Model generation error:", e)
-        candidates = []
+    # -----------------------------
+    # Generate raw outputs
+    # -----------------------------
+    raw_candidates = qg_pipeline(
+        base_prompt,
+        max_length=MAX_LENGTH,
+        num_return_sequences=NUM_CANDIDATES
+    )
 
-    # Post-process: strict filtering, dedupe (fuzzy), enforce meaningfulness
-    questions: List[Dict[str, Any]] = []
-    seen_texts: List[str] = []
+    candidates = [clean_generated_text(c.get("generated_text", "")) for c in raw_candidates]
 
-    # helper: pick appropriate fallback pool
-    fallback_pool = FALLBACK_POOLS.get(product_type, FALLBACK_POOLS["generic"])
+    # -----------------------------
+    # Filter, dedupe, validate
+    # -----------------------------
+    final = []
+    seen = []
 
-    for cand in candidates:
-        if not cand:
+    for q in candidates:
+        q = q.strip()
+        if not q:
             continue
-        q = cand.strip()
-        q_low = q.lower()
-
-        # 1) forbid meta or banned patterns
         if is_forbidden(q):
             continue
-
-        # 2) enforce meaningful-ness: question must contain a transparency keyword OR match category-specific allowed themes
         if not is_meaningful(q):
-            # small exception: allow short targeted questions that include 'is'/'are' + category hints, but still check keywords
+            continue
+        if is_duplicate(q, seen):
             continue
 
-        # 3) category safety: prevent ingredient questions for electronics
-        if product_type == "electronics":
-            if any(kw in q_low for kw in ["ingredient", "ingredients", "formulation", "preservative", "allergen"]):
-                continue
-
-        # 4) supply-side: avoid asking about 'who made' etc (redundant but safe)
-        if any(phr in q_low for phr in ["who made", "who is", "who sells", "what is the name"]):
+        # electronics: never ask ingredient questions
+        if category == "electronics" and any(x in q.lower() for x in ["ingredient", "formulation"]):
             continue
 
-        # 5) dedupe via fuzzy matching
-        if is_duplicate(q, seen_texts, threshold=0.75):
-            continue
+        seen.append(q)
+        final.append(q)
+        if len(final) >= NUM_QUESTIONS:
+            break
 
-        # Accept
-        seen_texts.append(q)
-        questions.append({
-            "id": f"q{len(questions)+1}",
+    # -----------------------------
+    # If not enough → use fallbacks
+    # -----------------------------
+    pool = FALLBACK.get(category, FALLBACK["generic"])
+
+    for fb in pool:
+        if len(final) >= NUM_QUESTIONS:
+            break
+        if not is_duplicate(fb, seen):
+            seen.append(fb)
+            final.append(fb)
+
+    # -----------------------------
+    # Convert to output format
+    # -----------------------------
+    output = []
+    for i, q in enumerate(final[:NUM_QUESTIONS]):
+        output.append({
+            "id": f"q{i+1}",
             "text": q,
             "type": "text",
             "options": None
         })
 
-        if len(questions) >= NUM_QUESTIONS:
-            break
-
-    # If not enough high-quality generated questions, fill from fallback pool (unique only)
-    i = 0
-    while len(questions) < NUM_QUESTIONS and i < len(fallback_pool) * 2:
-        fallback_q = fallback_pool[len(questions) % len(fallback_pool)]
-        if not is_duplicate(fallback_q, seen_texts, threshold=0.75):
-            seen_texts.append(fallback_q)
-            questions.append({
-                "id": f"q{len(questions)+1}",
-                "text": fallback_q,
-                "type": "text",
-                "options": None
-            })
-        i += 1
-
-    # Final safety: if still short (very unlikely), add generic items
-    generic_pool = FALLBACK_POOLS["generic"]
-    j = 0
-    while len(questions) < NUM_QUESTIONS and j < len(generic_pool) * 2:
-        fallback_q = generic_pool[len(questions) % len(generic_pool)]
-        if not is_duplicate(fallback_q, seen_texts, threshold=0.75):
-            seen_texts.append(fallback_q)
-            questions.append({
-                "id": f"q{len(questions)+1}",
-                "text": fallback_q,
-                "type": "text",
-                "options": None
-            })
-        j += 1
-
-    # Final trimming/normalization (ensure text is clean)
-    final_questions = []
-    for q in questions[:NUM_QUESTIONS]:
-        txt = q["text"].strip()
-        # remove trailing punctuation issues
-        if txt.endswith("?"):
-            txt = txt.rstrip()
-        final_questions.append({
-            "id": q["id"],
-            "text": txt,
-            "type": "text",
-            "options": None
-        })
-
-    return {"questions": final_questions}
+    return {"questions": output}
