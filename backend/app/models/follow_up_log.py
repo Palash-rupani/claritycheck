@@ -11,3 +11,9 @@ class FollowUpLog(Base):
     answer = Column(JSON, nullable=True)
     asked_by = Column(String, nullable=True)  # "ai" or "user"
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+class AnswerRecord(Base):
+    __tablename__ = "answer_records"
+
+    product_id = Column(String, primary_key=True, index=True)
+    answers = Column(JSON, default={})
