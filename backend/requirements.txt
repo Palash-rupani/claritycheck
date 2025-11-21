@@ -1,4 +1,8 @@
-transformers
-sentencepiece
-accelerate
-torch
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+python-dotenv
+pydantic
+alembic
+requests
