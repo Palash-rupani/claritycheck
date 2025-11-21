@@ -2,42 +2,42 @@
 
 import os
 import difflib
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Dict, List, Any
 from dotenv import load_dotenv
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
+from transformers import pipeline
 
 from utils import profile_to_prompt, clean_generated_text
 
 # -----------------------------
-# Load environment variables
+# ENV + MODEL CONFIG
 # -----------------------------
 load_dotenv()
 
-MODEL_NAME = os.getenv("AI_MODEL", "google/flan-t5-large")
-NUM_QUESTIONS = int(os.getenv("NUM_QUESTIONS", "6"))
-MAX_LENGTH = int(os.getenv("MAX_LENGTH", "150"))
-NUM_CANDIDATES = int(os.getenv("NUM_CANDIDATES", str(NUM_QUESTIONS * 3)))
+APP_MODEL = os.getenv("AI_MODEL", "google/flan-t5-large")   # CPU-friendly
+NUM_QUESTIONS = int(os.getenv("NUM_QUESTIONS", "5"))
+MAX_LENGTH = int(os.getenv("MAX_LENGTH", "128"))
+NUM_CANDIDATES = max(NUM_QUESTIONS * 3, 10)   # generate more → better dedupe
 
-app = FastAPI(title="ClarityCheck AI Service - Smart QG")
+# -----------------------------
+# START FASTAPI
+# -----------------------------
+app = FastAPI(title="ClarityCheck AI Service (No Torch Version)")
 
-print(f"\n🚀 Loading model: {MODEL_NAME} (CPU-only)\n")
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSeq2SeqLM.from_pretrained(
-    MODEL_NAME,
-    device_map="cpu"
-)
+# -----------------------------
+# LOAD MODEL — SAFE (NO TORCH)
+# -----------------------------
+print(f"🚀 Loading model: {APP_MODEL} (CPU-only, no torch)...")
 
 qg_pipeline = pipeline(
     "text2text-generation",
-    model=model,
-    tokenizer=tokenizer,
-    device=-1
+    model=APP_MODEL,
+    device=-1  # force CPU, no torch needed
 )
 
-print("✅ Model loaded successfully.\n")
+print("✅ Model loaded successfully (pipeline only).")
 
 
 # -----------------------------
@@ -51,7 +51,7 @@ class FollowupRequest(BaseModel):
 class QuestionOut(BaseModel):
     id: str
     text: str
-    type: str
+    type: str = "text"
     options: List[str] | None = None
 
 
@@ -59,51 +59,47 @@ class FollowupsResponse(BaseModel):
     questions: List[QuestionOut]
 
 
+# -----------------------------
+# HEALTH CHECK
+# -----------------------------
 @app.get("/")
 def root():
     return {"status": "ok", "service": "claritycheck-ai"}
 
 
 # -----------------------------
-# FILTERING RULES
+# FILTERS + DEDUPE
 # -----------------------------
-FORBIDDEN_PATTERNS = [
+FORBIDDEN = [
+    "any other",
+    "what else",
+    "other questions",
+    "anything else",
+    "can i ask",
+    "what can i ask",
     "manufacturer",
     "who made",
     "brand name",
-    "product name",
-    "what is the name",
     "batch number",
     "lot number",
-    "where is it sold",
-    "any other questions",
-    "are there any other",
-    "what else",
-    "other questions",
-    "can i ask",
-    "how to ask",
+    "product name",
 ]
 
 MEANINGFUL_KEYWORDS = [
-    "ingredient", "sourcing", "supplier", "origin", "trace", "traceability",
-    "test", "lab", "coa", "certificate", "certification", "allergen",
-    "preservative", "processing", "pesticide", "farming", "manufacturing",
-    "compliance", "rohs", "ce", "safety", "stability", "contaminant", "purity",
-    "packaging", "recycl", "waste", "ethic", "sustainab", "supply", "quality",
+    "ingredient", "sourcing", "supplier", "origin", "trace", "lab", "test",
+    "certificate", "coa", "allergen", "processing", "pesticide", "farming",
+    "safety", "compliance", "rohs", "recycl", "purity", "stability",
 ]
-
 
 def is_forbidden(q: str) -> bool:
     q = q.lower()
-    return any(f in q for f in FORBIDDEN_PATTERNS)
-
+    return any(bad in q for bad in FORBIDDEN)
 
 def is_meaningful(q: str) -> bool:
     q = q.lower()
-    return any(k in q for k in MEANINGFUL_KEYWORDS)
+    return any(kw in q for kw in MEANINGFUL_KEYWORDS)
 
-
-def is_duplicate(q: str, seen: List[str], threshold=0.75) -> bool:
+def is_duplicate(q: str, seen: List[str], threshold: float = 0.78) -> bool:
     for s in seen:
         if difflib.SequenceMatcher(None, q.lower(), s.lower()).ratio() >= threshold:
             return True
@@ -111,49 +107,50 @@ def is_duplicate(q: str, seen: List[str], threshold=0.75) -> bool:
 
 
 # -----------------------------
-# CATEGORY FALLBACK POOLS
+# FALLBACK QUESTIONS
 # -----------------------------
 FALLBACK = {
     "electronics": [
-        "Is the product compliant with RoHS or similar safety standards?",
-        "Are battery or electrical safety test reports available?",
-        "Are key components recyclable or sustainably sourced?",
-        "Are repair manuals or spare parts available?"
+        "Is the device compliant with RoHS material restrictions?",
+        "Are safety tests available for batteries or heating components?",
+        "Are repair manuals or spare parts available for servicing?",
+        "Are key components recyclable or reusable?",
     ],
     "skincare": [
-        "Are any ingredients subject to allergen warnings?",
-        "Is there third-party testing for safety or irritation?",
-        "Is a Certificate of Analysis available for key actives?",
-        "Do suppliers provide verified sourcing details?"
+        "Are there irritation or sensitization test reports for the formula?",
+        "Do suppliers provide provenance for botanical ingredients?",
+        "Is a Certificate of Analysis available for active ingredients?",
+        "Are allergens disclosed clearly for sensitive users?",
+    ],
+    "packaged": [
+        "Are all ingredients traceable to verified suppliers?",
+        "What quality control steps are followed during processing?",
+        "Are preservatives or additives documented clearly?",
+        "Are third-party lab tests available for contaminants?",
     ],
     "raw": [
         "What farming practices were used during cultivation?",
-        "Were any pesticides applied during growth?",
+        "Were pesticides or fertilizers applied during growth?",
         "From which region were the raw ingredients sourced?",
-        "How was freshness maintained during transport?"
-    ],
-    "packaged": [
-        "Are all ingredients fully traceable to their suppliers?",
-        "What processing or quality-control steps are documented?",
-        "Are any additives or preservatives used?",
-        "Are third-party quality checks performed?"
+        "How was the product stored and transported after harvest?",
     ],
     "supplement": [
-        "Is a Certificate of Analysis (COA) available for each batch?",
+        "Is a Certificate of Analysis available for each batch?",
         "Has the product undergone purity or potency testing?",
-        "Can you trace the source of each active ingredient?",
-        "Are stability studies available for shelf life?"
+        "Are all active ingredients fully traceable to origin?",
+        "Are stability and shelf-life studies documented?",
     ],
     "generic": [
-        "Are third-party safety or compliance reports available?",
-        "Can you verify supplier traceability for key materials?",
-        "Is documentation available to support marketing claims?"
-    ]
+        "Are third-party compliance certificates available?",
+        "Can you share supplier traceability for main materials?",
+        "Is there documentation validating major product claims?",
+        "Are quality or safety test reports available?",
+    ],
 }
 
 
 # -----------------------------
-# POST /followups
+# MAIN ENDPOINT
 # -----------------------------
 @app.post("/followups", response_model=FollowupsResponse)
 def generate_followups(req: FollowupRequest):
@@ -161,41 +158,40 @@ def generate_followups(req: FollowupRequest):
     product = req.product or {}
     profile = req.profile or {}
 
-    # Handle Supabase structure
-    profile_data = profile.get("profile", profile)
-
     name = (product.get("name") or "").strip()
+    category_raw = (product.get("category") or "").lower().strip()
     description = (product.get("description") or "").strip()
     claim = (product.get("claim") or "").strip()
-    category_raw = (product.get("category") or "").lower().strip()
 
-    ingredients = profile_data.get("ingredients", "")
-    sourcing = profile_data.get("sourcing", "")
-    certifications = profile_data.get("certifications", "")
+    # supabase nested structure fix
+    if isinstance(profile, dict) and "profile" in profile:
+        profile = profile["profile"]
 
-    structured_profile = profile_to_prompt(profile_data)
+    structured_profile = profile_to_prompt(profile)
 
-    # Category detection
+    # category detection
     if any(x in category_raw for x in ["electronic", "device", "gadget"]):
-        category = "electronics"
-    elif any(x in category_raw for x in ["skincare", "cosmetic", "serum"]):
-        category = "skincare"
-    elif any(x in category_raw for x in ["vegetable", "fruit", "grain", "produce"]):
-        category = "raw"
-    elif any(x in category_raw for x in ["snack", "food", "packaged", "processed"]):
-        category = "packaged"
-    elif any(x in category_raw for x in ["supplement", "vitamin"]):
-        category = "supplement"
+        ptype = "electronics"
+    elif any(x in category_raw for x in ["skincare", "cosmetic", "serum", "cream"]):
+        ptype = "skincare"
+    elif any(x in category_raw for x in ["snack", "food", "packaged", "beverage"]):
+        ptype = "packaged"
+    elif any(x in category_raw for x in ["fruit", "vegetable", "raw", "grain"]):
+        ptype = "raw"
+    elif any(x in category_raw for x in ["supplement", "tablet", "vitamin"]):
+        ptype = "supplement"
     else:
-        category = "generic"
+        ptype = "generic"
 
-    # -----------------------------
-    # Build model prompt
-    # -----------------------------
-    base_prompt = f"""
-Generate ONE short (max 20 words), category-focused transparency question.
+    # ------------------------
+    # MODEL PROMPT
+    # ------------------------
+    prompt = f"""
+Generate ONE concise transparency follow-up question.
+Focus ONLY on: sourcing, testing, compliance, traceability, certifications, quality checks, safety, or ingredient origin.
+Avoid generic, meta, or repetitive questions.
 
-Product Name: {name}
+Product: {name}
 Category: {category_raw}
 Claim: {claim}
 Description: {description}
@@ -204,72 +200,68 @@ Profile:
 {structured_profile}
 
 Rules:
-- MUST focus on transparency: testing, sourcing, traceability, certification, compliance, or safety.
-- NEVER ask about product name, manufacturer name, “other questions”, or meta questions.
-- MUST match the category.
-- Question must be unique and meaningful.
-Return only the question.
+- MUST be under 20 words.
+- MUST be meaningful.
+- MUST be category-appropriate.
+- NEVER ask “any other questions”.
+- NEVER ask for product name or manufacturer.
+Return ONLY the question text.
 """
 
-    # -----------------------------
-    # Generate raw outputs
-    # -----------------------------
-    raw_candidates = qg_pipeline(
-        base_prompt,
+    # ------------------------
+    # GENERATE CANDIDATES
+    # ------------------------
+    raw_outputs = qg_pipeline(
+        prompt,
         max_length=MAX_LENGTH,
-        num_return_sequences=NUM_CANDIDATES
+        num_return_sequences=NUM_CANDIDATES,
     )
 
-    candidates = [clean_generated_text(c.get("generated_text", "")) for c in raw_candidates]
+    candidates = [clean_generated_text(o.get("generated_text", "")) for o in raw_outputs]
 
-    # -----------------------------
-    # Filter, dedupe, validate
-    # -----------------------------
-    final = []
     seen = []
+    final = []
 
+    # ------------------------
+    # FILTER + DEDUPE
+    # ------------------------
     for q in candidates:
-        q = q.strip()
         if not q:
             continue
-        if is_forbidden(q):
+        qlow = q.lower()
+
+        if is_forbidden(qlow):
             continue
-        if not is_meaningful(q):
+        if not is_meaningful(qlow):
             continue
-        if is_duplicate(q, seen):
+        if ptype == "electronics" and "ingredient" in qlow:
+            continue
+        if is_duplicate(qlow, seen):
             continue
 
-        # electronics: never ask ingredient questions
-        if category == "electronics" and any(x in q.lower() for x in ["ingredient", "formulation"]):
-            continue
-
-        seen.append(q)
+        seen.append(qlow)
         final.append(q)
+
         if len(final) >= NUM_QUESTIONS:
             break
 
-    # -----------------------------
-    # If not enough → use fallbacks
-    # -----------------------------
-    pool = FALLBACK.get(category, FALLBACK["generic"])
+    # ------------------------
+    # FALLBACKS
+    # ------------------------
+    fb = FALLBACK.get(ptype, FALLBACK["generic"])
+    i = 0
+    while len(final) < NUM_QUESTIONS and i < len(fb):
+        if not is_duplicate(fb[i].lower(), seen):
+            final.append(fb[i])
+            seen.append(fb[i].lower())
+        i += 1
 
-    for fb in pool:
-        if len(final) >= NUM_QUESTIONS:
-            break
-        if not is_duplicate(fb, seen):
-            seen.append(fb)
-            final.append(fb)
+    # ------------------------
+    # FORMAT OUTPUT
+    # ------------------------
+    output = [
+        QuestionOut(id=f"q{i+1}", text=final[i])
+        for i in range(min(len(final), NUM_QUESTIONS))
+    ]
 
-    # -----------------------------
-    # Convert to output format
-    # -----------------------------
-    output = []
-    for i, q in enumerate(final[:NUM_QUESTIONS]):
-        output.append({
-            "id": f"q{i+1}",
-            "text": q,
-            "type": "text",
-            "options": None
-        })
-
-    return {"questions": output}
+    return FollowupsResponse(questions=output)
