@@ -19,6 +19,8 @@ router = APIRouter()
 AI_SERVICE_URL = "https://claritycheck-production.up.railway.app/followups"
 
 
+
+
 # ---------------------------------------------------------
 # 0) List all products
 # ---------------------------------------------------------
