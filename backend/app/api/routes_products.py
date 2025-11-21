@@ -18,19 +18,17 @@ router = APIRouter()
 
 AI_SERVICE_URL = "https://claritycheck-production.up.railway.app/followups"
 
-
-
-
 # ---------------------------------------------------------
-# 0) List all products
+# 0) List all products  (NOW WORKS FOR /products AND /products/)
 # ---------------------------------------------------------
+@router.get("", response_model=list[ProductOut])     # NEW
 @router.get("/", response_model=list[ProductOut])
 def list_products(db: Session = Depends(get_db)):
     return get_all_products(db)
 
 
 # ---------------------------------------------------------
-# 1) Create a product  (FIX: accepts /products AND /products/)
+# 1) Create a product  (works for /products and /products/)
 # ---------------------------------------------------------
 @router.post("", response_model=ProductOut)
 @router.post("/", response_model=ProductOut)
@@ -56,7 +54,7 @@ def get_product(product_id: str, db: Session = Depends(get_db)):
 
 
 # ---------------------------------------------------------
-# 2) Update profile and request followups from AI service
+# 2) Update profile + call AI service for followups
 # ---------------------------------------------------------
 @router.post("/{product_id}/profile")
 def update_profile(product_id: str, payload: ProfileIn, db: Session = Depends(get_db)):
@@ -78,11 +76,7 @@ def update_profile(product_id: str, payload: ProfileIn, db: Session = Depends(ge
             "profile": payload.profile
         }
 
-        response = requests.post(
-            AI_SERVICE_URL,
-            json=payload_for_ai,
-            timeout=15
-        )
+        response = requests.post(AI_SERVICE_URL, json=payload_for_ai, timeout=15)
         response.raise_for_status()
 
         followups = response.json().get("questions", [])
@@ -107,7 +101,7 @@ def update_profile(product_id: str, payload: ProfileIn, db: Session = Depends(ge
 
 
 # ---------------------------------------------------------
-# 3) Get follow-up questions
+# 3) Get saved followup questions
 # ---------------------------------------------------------
 @router.get("/{product_id}/followups")
 def get_followups(product_id: str, db: Session = Depends(get_db)):
