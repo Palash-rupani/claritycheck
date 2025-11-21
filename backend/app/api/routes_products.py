@@ -16,7 +16,7 @@ from app.crud.followups import log_followup
 
 router = APIRouter()
 
-AI_SERVICE_URL = "http://localhost:8001/followups"
+AI_SERVICE_URL = "https://claritycheck-production.up.railway.app/followups"
 
 
 # ---------------------------------------------------------
