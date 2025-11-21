@@ -1,5 +1,4 @@
-export const BASE_URL = "https://gallant-adaptation-production.up.railway.app";
-
+const BASE_URL = "http://localhost:8000";
 
 export async function createProduct(payload: {
   name: string;
